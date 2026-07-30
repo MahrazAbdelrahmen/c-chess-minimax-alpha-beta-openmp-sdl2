@@ -1,0 +1,37 @@
+# Build outputs
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.stackdump
+
+chess_console
+chess_console.exe
+chess_sdl
+chess_sdl.exe
+main
+chess
+y
+
+# Generated logs / saved games
+partie.txt
+build_stdout.txt
+build_stderr.txt
+console_out.txt
+console_err.txt
+sdl_out.txt
+sdl_err.txt
+console_syntax_out.txt
+console_syntax_err.txt
+sdl_syntax_out.txt
+sdl_syntax_err.txt
+
+# OS / download metadata
+.DS_Store
+Thumbs.db
+*Zone.Identifier
+*Zone.Identifier*
