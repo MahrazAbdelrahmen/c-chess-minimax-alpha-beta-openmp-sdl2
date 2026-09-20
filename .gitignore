@@ -3,22 +3,40 @@
 *.obj
 *.a
 *.lib
+*.so
+*.dylib
 *.exe
 *.dll
 *.pdb
 *.ilk
+*.exp
+*.map
 *.stackdump
+*.gcda
+*.gcno
+gmon.out
 
 chess_console
-chess_console.exe
 chess_sdl
-chess_sdl.exe
 main
 chess
 y
 
-# Generated logs / saved games
+# Build trees and downloaded dependencies
+build/
+deps/
+cmake-build-*/
+compile_commands.json
+.cache/
+
+# Fonts fetched at build time (Clash Display may not be redistributed)
+fonts/ClashDisplay-*.ttf
+
+# Generated logs, saved games and benchmark results
 partie.txt
+*.log
+benchmark.csv
+benchmark.old.csv
 build_stdout.txt
 build_stderr.txt
 console_out.txt
@@ -30,8 +48,29 @@ console_syntax_err.txt
 sdl_syntax_out.txt
 sdl_syntax_err.txt
 
+# Editors
+.vscode/
+.idea/
+*.kate-swp
+.kateproject.d/
+*.kdev4
+.kdev4/
+*.swp
+*.swo
+*~
+.#*
+\#*#
+
+# Scratch and recovery files
+*.orig
+*.rej
+*.bak
+*.corrupted.c
+*.tmp
+
 # OS / download metadata
 .DS_Store
 Thumbs.db
+desktop.ini
 *Zone.Identifier
 *Zone.Identifier*

@@ -17,18 +17,9 @@
 // transposition table flags
 typedef enum {
     TT_EXACT,
-    TT_ALPHA, // upper bound
-    TT_BETA   // lower bound
+    TT_ALPHA,  // upper bound
+    TT_BETA  // lower bound
 } TTFlag;
-
-// we store one entry per visited position so threads can share results instead of recomputing them
-struct TTEntry {
-    uint64_t key;
-    int value;
-    int depth;
-    TTFlag flag;
-    int bestMoveIndex;
-};
 
 struct config {
     char mat[8][8];
@@ -36,32 +27,47 @@ struct config {
     char xrN, yrN, xrB, yrB;
     char roqueN, roqueB;
 
-    // we use this zobrist hash for O(1) lookups instead of scanning the board to check if a position was visited
     uint64_t hash;
 };
 
-/* --- transposition table / zobrist --- */
+// --- transposition table / zobrist ---
 
 void initialiser_zobrist();
 uint64_t calculer_hash(struct config* conf);
 uint64_t mettre_a_jour_hash(uint64_t hash_courant, struct config* ancienne_conf,
     struct config* nouvelle_conf);
-void tt_sauvegarder(uint64_t key, int val, TTFlag flag, int depth, int bestMoveIndex);
-bool tt_verifier(uint64_t key, int depth, int alpha, int beta, int* val,
-    int* bestMoveIndex);
+void tt_sauvegarder(uint64_t key, int val, TTFlag flag, int depth, int coup);
+bool tt_verifier(uint64_t key, int depth, int alpha, int beta, int* val, int* coup);
 void tt_liberer();
 
-/* --- search --- */
+// --- search ---
 
-// we split the work at the root: generate every move, then hand them out across threads that each run alpha-beta sequentially and share the transposition table
-int minmax_parallele(struct config* conf, int mode, int niv, int alpha, int beta,
-    int largeur, int numFctEst, int npp);
+typedef enum {
+    RECHERCHE_SEQUENTIELLE,  // one thread, root moves in order
+    RECHERCHE_PARALLELE,  // root moves split across OpenMP threads
+    RECHERCHE_YBW,
+    RECHERCHE_LAZY_SMP,
+    RECHERCHE_COUNT
+} TypeRecherche;
 
-// we run this on each thread after it gets its root move; it checks the transposition table first and saves into it before returning
+typedef struct {
+    int best_index;  // index into T of the chosen move
+    int score;  // minimax value of that move
+    double seconds;  // wall-clock search time
+    long long nodes;  // positions visited, summed over all threads
+    long long cutoffs;  // alpha + beta cutoffs, summed over all threads
+    int threads;  // 1 for sequential, the OpenMP thread count for parallel
+} ResultatRecherche;
+
+int chercher_meilleur_coup(struct config* conf, int mode, int niv, int largeur, int numFctEst,
+    TypeRecherche type, struct config T[], int* n, ResultatRecherche* res);
+
+void annuler_recherche(int annuler);
+
 int minmax_alpha_beta(struct config* conf, int mode, int niv, int min, int max,
     int largeur, int numFctEst, int npp);
 
-/* --- move generation / evaluation --- */
+// --- move generation / evaluation ---
 
 int estimation_1(struct config* conf);
 int estimation_2(struct config* conf);
@@ -83,7 +89,6 @@ void initialiser_configuration(struct config* conf);
 int nombre_pieces(struct config* conf);
 void afficher_configuration(struct config* conf, char* coup, int num);
 
-// we can use conf->hash here instead of comparing boards cell by cell
 int deja_visitee(struct config* conf, int mode);
 
 void sauvegarder_configuration(struct config* conf);

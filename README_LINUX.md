@@ -1,106 +1,24 @@
-# Chess Engine with SDL2 UI - Linux Build Instructions
+# Linux build notes
 
-## Quick Build
+Full instructions are in [README.md](README.md).
 
-```bash
-chmod +x build_linux.sh
-./build_linux.sh
-```
-
-## Manual Build
-
-### 1. Install Dependencies
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev build-essential
-```
-
-**Arch/Manjaro:**
-```bash
-sudo pacman -S sdl2 sdl2_image sdl2_ttf base-devel
-```
-
-**Fedora:**
-```bash
-sudo dnf install SDL2-devel SDL2_image-devel SDL2_ttf-devel gcc openmp
-```
-
-### 2. Compile
+## Dependencies
 
 ```bash
-gcc -c jeu.c -o jeu.o -fopenmp -O2
-gcc -c ui.c -o ui.o $(pkg-config --cflags sdl2 SDL2_image SDL2_ttf) -O2
-gcc -c main_sdl.c -o main_sdl.o $(pkg-config --cflags sdl2 SDL2_image SDL2_ttf) -O2
-gcc jeu.o ui.o main_sdl.o -o chess_sdl $(pkg-config --libs sdl2 SDL2_image SDL2_ttf) -fopenmp -lm
+sudo apt-get install build-essential libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev   # Debian/Ubuntu
+sudo pacman -S base-devel sdl2 sdl2_image sdl2_ttf                                   # Arch
+sudo dnf install gcc SDL2-devel SDL2_image-devel SDL2_ttf-devel                      # Fedora
 ```
 
-Or single command:
-```bash
-gcc jeu.c ui.c main_sdl.c -o chess_sdl $(pkg-config --libs sdl2 SDL2_image SDL2_ttf) -fopenmp -lm -O2
-```
-
-### 3. Run
+## Build and run
 
 ```bash
-./chess_sdl
+./build_linux.sh        # or: make all
+./chess_sdl             # run from the project directory
 ```
 
-**Important:** Run from the project directory so it can find the `chess_green/` folder with piece images.
+## Notes
 
-## Controls
-
-### Menu
-- **UP/DOWN arrows**: Navigate options
-- **ENTER**: Select
-- **ESC**: Quit
-
-### Gameplay
-- **Left Click**: Select piece / Move
-- **Right Click**: Cancel selection
-- **ESC**: Return to menu
-
-## Game Modes
-
-1. **PC vs PC**: Watch AI play itself
-2. **Human (Black) vs PC**: You play Black
-3. **Human (White) vs PC**: You play White  
-4. **Quit**: Exit to desktop
-
-## Troubleshooting
-
-### "Piece images not loading"
-Make sure you're running from the project directory:
-```bash
-cd /path/to/chess
-./chess_sdl
-```
-
-Check that `chess_green/` folder exists with the PNG files.
-
-### "SDL2 not found"
-Install the development packages (see step 1 above).
-
-### "undefined reference to SDL_..."
-Make sure pkg-config can find SDL2:
-```bash
-pkg-config --libs sdl2
-```
-
-### Pieces show as circles instead of images
-The PNG files aren't being found. Check:
-1. `chess_green/` folder is in the same directory as the executable
-2. File names match exactly (case-sensitive on Linux)
-
-### Console output
-The game prints loading status to console. Run from terminal to see:
-```bash
-./chess_sdl
-```
-
-## Original Console Version
-
-```bash
-gcc jeu.c main.c -o chess_console -fopenmp -O2
-./chess_console
-```
+- `./chess_sdl --pcvpc --benchmark --depth 4` plays a scripted benchmark game.
+- If a search thread crashes, raise the OpenMP stack: `export OMP_STACKSIZE=16M`.
+- The UI falls back to DejaVu fonts when the bundled ones are missing.

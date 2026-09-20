@@ -1,6 +1,3 @@
-// main.c: text UI for the minmax/alpha-beta chess demo (human vs pc, or pc vs pc).
-// original pedagogical base by Hidouci W.K. / ESI 2025; SDL, parallelism and
-// later fixes in this repo are separate from that original base.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h> 
@@ -17,14 +14,12 @@ FILE *f;
 int num_coup = 0;
 int h0 = 0;
 
-// we pick the estimation function at runtime through this table
 int (*Est[10])(struct config *);
 int nbEst;
 
 // alpha/beta cutoff counters, for stats
 int nbAlpha = 0;
 int nbBeta = 0;
-
 
 #define COL_RESET   "\033[0m"
 #define COL_RED     "\033[1;31m"
@@ -341,7 +336,6 @@ void initialiser_variables_globales() {
     srand((unsigned int)time(NULL));
 }
 
-
 void appliquer_logique_coup(struct config *curr, struct config *next, int sx, int sy, int dx, int dy, int is_white) {
     copier(curr, next);
     
@@ -349,7 +343,6 @@ void appliquer_logique_coup(struct config *curr, struct config *next, int sx, in
     int k_x = is_white ? curr->xrB : curr->xrN;
     int k_y = is_white ? curr->yrB : curr->yrN;
     
-
     if (sx == k_x + 1 && sy == k_y && dy == sy + 2) {
         next->mat[row_home][4] = 0;
         next->mat[row_home][7] = 0;
@@ -390,7 +383,7 @@ void appliquer_logique_coup(struct config *curr, struct config *next, int sx, in
                 case 'f': new_p = 'f'; break;
                 case 't': new_p = 't'; break;
                 case 'n': new_p = 'n'; break;
-                default:  new_p = 'n'; // we default to queen
+                default:  new_p = 'n';  // we default to queen
             }
             next->mat[dx-1][dy] = is_white ? new_p : -new_p;
         }
@@ -442,97 +435,32 @@ int gerer_tour_humain(struct config *conf, struct config *T, char *coup_str, int
             copier(&T[match_idx], conf);
             return 1;
         } else {
-            if (n == 0) return 0; // we treat "no legal moves" as mate
+            if (n == 0) return 0;
             printf(COL_RED "  Coup illegal (%c%d%c%d) -- Reessayer\n" COL_RESET, sy, sx, dy, dx);
         }
     }
 }
 
-static int choisir_meilleur_coup_racine(struct config *conf, struct config *T, int n,
-                                 int player_color, int depth, int width, int est_func,
-                                 int *best_index, int *best_score) {
-    int is_white = (player_color == MAX);
-    int search_width = (width <= 0) ? INFINI : width;
-    int nbp = nombre_pieces(conf);
-
-    if (n <= 0) return 0;
-
-    for (int i = 0; i < n; i++) T[i].val = Est[est_func](&T[i]);
-    if (is_white) qsort(T, n, sizeof(struct config), comparer_config_321);
-    else qsort(T, n, sizeof(struct config), comparer_config_123);
-
-    if (search_width < n) n = search_width;
-
-    *best_index = 0;
-    *best_score = minmax_alpha_beta(&T[0], is_white ? MIN : MAX, depth, -INFINI, +INFINI,
-                            search_width, est_func, nbp);
-
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int i = 1; i < n; i++) {
-        int current_bound = *best_score;
-        int value;
-
-        if (is_white) {
-            value = minmax_alpha_beta(&T[i], MIN, depth, current_bound, +INFINI,
-                              search_width, est_func, nbp);
-        } else {
-            value = minmax_alpha_beta(&T[i], MAX, depth, -INFINI, current_bound,
-                              search_width, est_func, nbp);
-        }
-
-        #pragma omp critical
-        {
-            if (is_white) {
-                if (value > *best_score) {
-                    *best_score = value;
-                    *best_index = i;
-                }
-            } else {
-                if (value < *best_score) {
-                    *best_score = value;
-                    *best_index = i;
-                }
-            }
-        }
-    }
-
-    return 1;
-}
-
-int gerer_tour_pc(struct config *conf, struct config *T, char *coup_str, int player_color, 
+int gerer_tour_pc(struct config *conf, struct config *T, char *coup_str, int player_color,
                    int depth, int width, int est_func) {
-    
-    int n, j, score;
+
+    int n;
     int is_white = (player_color == MAX);
-    
+    ResultatRecherche res;
+
     printf(COL_YEL "  Au tour du PC '%c' (Reflexion...)\n" COL_RESET, is_white ? 'B' : 'N');
 
-    generer_successeurs(conf, player_color, T, &n);
-
-    printf("  H=%d | Alternatives=%d\n", depth, n);
-
-    if (n == 0) return 0;
-
-    if (!choisir_meilleur_coup_racine(conf, T, n, player_color, depth, width, est_func, &j, &score)) {
+    if (!chercher_meilleur_coup(conf, player_color, depth, width, est_func, RECHERCHE_PARALLELE, T, &n, &res)) {
         return 0;
     }
 
-    if (j != -1) {
-        printf(COL_GRN "  Choix=%d (Score: %d)\n\n" COL_RESET, j+1, score);
-        formuler_coup(conf, &T[j], coup_str);
-        copier(&T[j], conf);
-        conf->val = score;
-        return 1;
-    }
-    
-    // we fall back to the first move if the search returned none (all pruned): usually a loss anyway
-    if (n > 0) {
-        formuler_coup(conf, &T[0], coup_str);
-        copier(&T[0], conf);
-        return 1;
-    }
-
-    return 0;
+    printf("  H=%d | Alternatives=%d | %.2f s | %lld noeuds | %d threads\n",
+           depth, n, res.seconds, res.nodes, res.threads);
+    printf(COL_GRN "  Choix=%d (Score: %d)\n\n" COL_RESET, res.best_index + 1, res.score);
+    formuler_coup(conf, &T[res.best_index], coup_str);
+    copier(&T[res.best_index], conf);
+    conf->val = res.score;
+    return 1;
 }
 
 int main( int argc, char *argv[] )
@@ -545,7 +473,6 @@ int main( int argc, char *argv[] )
    (void)argc;
    (void)argv;
    
-
    afficher_menu_principal();
 
    struct config T[MAX_MOVES], conf;
@@ -596,7 +523,7 @@ int main( int argc, char *argv[] )
 
       sauvegarder_configuration(&conf);
 
-      afficher_jeu_complet(&conf, coup, num_coup, tour, 1); // we pass 1 for unicode pieces
+      afficher_jeu_complet(&conf, coup, num_coup, tour, 1);  // we pass 1 for unicode pieces
 
       if (tour == MAX) {
          if (typeExec == 3) {
@@ -640,7 +567,6 @@ int main( int argc, char *argv[] )
          }
          
          if (!stop && typeExec == 1) {
-             // sleep(1); 
          }
       }
    }

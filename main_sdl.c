@@ -257,86 +257,214 @@ static void demarrer_partie_sdl(UIContext *ui_ctx, struct config *conf, int *num
     effacer_coups_valides(valid_moves);
     PartieLen = 0;
     enregistrer_position(conf, MAX);
+    ui_ctx->thinking = 0;
+    ui_ctx->thinking_seconds = 0.0;
+    memset(ui_ctx->last_search, 0, sizeof(ui_ctx->last_search));
+    memset(&ui_ctx->bench, 0, sizeof(ui_ctx->bench));
     printf("Game started. Mode: %d\n", ui_ctx->game_mode);
 }
 
-static int choisir_meilleur_coup_racine(struct config *conf, struct config *T, int n,
-                                 int player_color, int depth, int width, int est_func,
-                                 int *best_index, int *best_score) {
-    int is_white = (player_color == MAX);
-    int search_width = (width <= 0) ? INFINI : width;
-    int nbp = nombre_pieces(conf);
-
-    if (n <= 0) return 0;
-
-    for (int i = 0; i < n; i++) T[i].val = Est[est_func](&T[i]);
-    if (is_white) qsort(T, n, sizeof(struct config), comparer_config_321);
-    else qsort(T, n, sizeof(struct config), comparer_config_123);
-
-    if (search_width < n) n = search_width;
-
-    *best_index = 0;
-    *best_score = minmax_alpha_beta(&T[0], is_white ? MIN : MAX, depth, -INFINI, +INFINI,
-                            search_width, est_func, nbp);
-
-    #pragma omp parallel for schedule(dynamic, 1)
-    for (int i = 1; i < n; i++) {
-        int current_bound = *best_score;
-        int value;
-
-        if (is_white) {
-            value = minmax_alpha_beta(&T[i], MIN, depth, current_bound, +INFINI,
-                              search_width, est_func, nbp);
-        } else {
-            value = minmax_alpha_beta(&T[i], MAX, depth, -INFINI, current_bound,
-                              search_width, est_func, nbp);
-        }
-
-        #pragma omp critical
-        {
-            if (is_white) {
-                if (value > *best_score) {
-                    *best_score = value;
-                    *best_index = i;
-                }
-            } else {
-                if (value < *best_score) {
-                    *best_score = value;
-                    *best_index = i;
-                }
-            }
-        }
-    }
-
-    return 1;
+static int borner(int value, int low, int high) {
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
 }
 
-int gerer_tour_pc(struct config *conf, struct config *T, char *coup_str, 
-                   int player_color, int depth, int width, int est_func) {
-    int n, j, score;
-    
-    generer_successeurs(conf, player_color, T, &n);
-    
-    if (n == 0) return 0;
+static void appliquer_reglage_menu(UIContext *ui_ctx, int row, int control) {
+    int step = (control == MENU_CTRL_INCREMENT) ? 1 : -1;
 
-    if (!choisir_meilleur_coup_racine(conf, T, n, player_color, depth, width, est_func, &j, &score)) {
-        return 0;
+    switch (row) {
+        case MENU_ROW_WHITE_EVAL:
+            ui_ctx->est_white = borner(ui_ctx->est_white + step, 0, nbEst - 1);
+            break;
+        case MENU_ROW_BLACK_EVAL:
+            ui_ctx->est_black = borner(ui_ctx->est_black + step, 0, nbEst - 1);
+            break;
+        case MENU_ROW_WHITE_SEARCH:
+            ui_ctx->algo_white = (TypeRecherche)((ui_ctx->algo_white + step + RECHERCHE_COUNT) % RECHERCHE_COUNT);
+            break;
+        case MENU_ROW_BLACK_SEARCH:
+            ui_ctx->algo_black = (TypeRecherche)((ui_ctx->algo_black + step + RECHERCHE_COUNT) % RECHERCHE_COUNT);
+            break;
+        case MENU_ROW_DEPTH:
+            ui_ctx->depth = borner(ui_ctx->depth + step, 1, 8);
+            break;
+        case MENU_ROW_WIDTH:
+            if (control == MENU_CTRL_ALL) ui_ctx->width = 0;
+            else if (ui_ctx->width == 0) ui_ctx->width = 4;
+            else ui_ctx->width = borner(ui_ctx->width + step, 1, 20);
+            break;
+        case MENU_ROW_BENCHMARK:
+            ui_ctx->benchmark = (control == MENU_CTRL_INCREMENT);
+            break;
     }
-    
-    if (j != -1) {
-        formuler_coup(conf, &T[j], coup_str);
-        copier(&T[j], conf);
-        conf->val = score;
-        return 1;
+}
+
+static int basculer(int on) {
+    return on ? MENU_CTRL_DECREMENT : MENU_CTRL_INCREMENT;
+}
+
+typedef struct {
+    SDL_Thread *thread;
+    SDL_atomic_t done;
+    Uint32 started;
+
+    struct config conf;
+    int player, depth, width, est_func, benchmark;
+    TypeRecherche algo;
+
+    int success;
+    struct config chosen;
+    ResultatRecherche res;
+
+    int compared;
+    struct config seq_move;
+    ResultatRecherche seq;
+} RecherchePC;
+
+static int executer_recherche(void *data) {
+    RecherchePC *job = data;
+    struct config T[MAX_MOVES];
+    int n = 0;
+
+    job->success = chercher_meilleur_coup(&job->conf, job->player, job->depth, job->width, job->est_func,
+                                          job->algo, T, &n, &job->res);
+    if (job->success) {
+        copier(&T[job->res.best_index], &job->chosen);
+
+        if (job->benchmark && job->algo != RECHERCHE_SEQUENTIELLE &&
+            chercher_meilleur_coup(&job->conf, job->player, job->depth, job->width, job->est_func,
+                                   RECHERCHE_SEQUENTIELLE, T, &n, &job->seq)) {
+            copier(&T[job->seq.best_index], &job->seq_move);
+            job->compared = 1;
+        }
     }
-    
-    if (n > 0) {
-        formuler_coup(conf, &T[0], coup_str);
-        copier(&T[0], conf);
-        return 1;
-    }
-    
+
+    SDL_AtomicSet(&job->done, 1);
     return 0;
+}
+
+static void lancer_recherche(RecherchePC *job, UIContext *ui_ctx, struct config *conf, int player) {
+    int is_white = (player == MAX);
+
+    memset(job, 0, sizeof(*job));
+    copier(conf, &job->conf);
+    job->player = player;
+    job->depth = ui_ctx->depth;
+    job->width = ui_ctx->width;
+    job->est_func = is_white ? ui_ctx->est_white : ui_ctx->est_black;
+    job->algo = is_white ? ui_ctx->algo_white : ui_ctx->algo_black;
+    job->benchmark = ui_ctx->benchmark;
+    job->started = SDL_GetTicks();
+    job->thread = SDL_CreateThread(executer_recherche, "engine", job);
+}
+
+static void abandonner_recherche(RecherchePC *job) {
+    if (!job->thread) return;
+    annuler_recherche(1);
+    SDL_WaitThread(job->thread, NULL);
+    annuler_recherche(0);
+    job->thread = NULL;
+}
+
+static const char *nom_fichier_benchmark = "benchmark.csv";
+static const char *entete_benchmark =
+    "move,side,algo,heuristic,depth,width,threads,seq_ms,algo_ms,speedup,"
+    "seq_nodes,algo_nodes,seq_score,algo_score,seq_move,algo_move,same_move\n";
+
+static void journaliser_benchmark(RecherchePC *job) {
+    char first_line[256] = "";
+    FILE *csv = fopen(nom_fichier_benchmark, "r");
+    char seq_coup[20];
+    char algo_coup[20];
+
+    if (csv) {
+        if (!fgets(first_line, sizeof(first_line), csv)) first_line[0] = '\0';
+        fclose(csv);
+        if (first_line[0] && strcmp(first_line, entete_benchmark) != 0) {
+            remove("benchmark.old.csv");
+            rename(nom_fichier_benchmark, "benchmark.old.csv");
+            first_line[0] = '\0';
+        }
+    }
+
+    csv = fopen(nom_fichier_benchmark, "a");
+    if (!csv) return;
+    if (!first_line[0]) fputs(entete_benchmark, csv);
+
+    formuler_coup(&job->conf, &job->seq_move, seq_coup);
+    formuler_coup(&job->conf, &job->chosen, algo_coup);
+    fprintf(csv, "%d,%s,%s,%d,%d,%d,%d,%.3f,%.3f,%.3f,%lld,%lld,%d,%d,%s,%s,%d\n",
+            num_coup + 1, job->player == MAX ? "white" : "black", interface_nom_algo(job->algo),
+            job->est_func + 1, job->depth, job->width, job->res.threads,
+            job->seq.seconds * 1000.0, job->res.seconds * 1000.0,
+            job->res.seconds > 0.0 ? job->seq.seconds / job->res.seconds : 0.0,
+            job->seq.nodes, job->res.nodes, job->seq.score, job->res.score, seq_coup, algo_coup,
+            configurations_egales(job->seq_move.mat, job->chosen.mat));
+    fclose(csv);
+}
+
+static void comptabiliser_recherche(UIContext *ui_ctx, RecherchePC *job) {
+    DerniereRecherche *last = &ui_ctx->last_search[job->player == MAX ? 0 : 1];
+
+    last->valid = 1;
+    last->algo = job->algo;
+    last->seconds = job->res.seconds;
+    last->nodes = job->res.nodes;
+    last->threads = job->res.threads;
+
+    if (!job->compared) return;
+
+    StatsBenchmark *bench = &ui_ctx->bench[job->algo];
+    int same_move = configurations_egales(job->seq_move.mat, job->chosen.mat);
+
+    bench->compared++;
+    bench->same_move += same_move;
+    bench->same_score += (job->seq.score == job->res.score);
+    bench->seq_seconds += job->seq.seconds;
+    bench->algo_seconds += job->res.seconds;
+    bench->seq_nodes += job->seq.nodes;
+    bench->algo_nodes += job->res.nodes;
+
+    printf("  bench: seq %.3fs %lld nodes score %d | %s %.3fs %lld nodes score %d | speedup %.2fx | %s\n",
+           job->seq.seconds, job->seq.nodes, job->seq.score, interface_nom_algo(job->algo),
+           job->res.seconds, job->res.nodes, job->res.score,
+           job->res.seconds > 0.0 ? job->seq.seconds / job->res.seconds : 0.0,
+           same_move ? "same move" : "DIFFERENT move");
+    journaliser_benchmark(job);
+}
+
+typedef struct {
+    int autostart;  // start a PC vs PC game immediately
+    int quit_after;
+} OptionsLancement;
+
+static TypeRecherche lire_algo(const char *value) {
+    if (value && strcmp(value, "seq") == 0) return RECHERCHE_SEQUENTIELLE;
+    if (value && strcmp(value, "par") == 0) return RECHERCHE_PARALLELE;
+    if (value && strcmp(value, "lazy") == 0) return RECHERCHE_LAZY_SMP;
+    return RECHERCHE_YBW;
+}
+
+static void lire_options(int argc, char *argv[], UIContext *ui_ctx, OptionsLancement *options) {
+    memset(options, 0, sizeof(*options));
+
+    for (int i = 1; i < argc; i++) {
+        const char *next = (i + 1 < argc) ? argv[i + 1] : NULL;
+
+        if (strcmp(argv[i], "--pcvpc") == 0) options->autostart = 1;
+        else if (strcmp(argv[i], "--benchmark") == 0) ui_ctx->benchmark = 1;
+        else if (strcmp(argv[i], "--depth") == 0 && next) { ui_ctx->depth = borner(atoi(next), 1, 8); i++; }
+        else if (strcmp(argv[i], "--width") == 0 && next) { ui_ctx->width = borner(atoi(next), 0, 20); i++; }
+        else if (strcmp(argv[i], "--heuristic") == 0 && next) {
+            ui_ctx->est_white = ui_ctx->est_black = borner(atoi(next) - 1, 0, nbEst - 1);
+            i++;
+        }
+        else if (strcmp(argv[i], "--white") == 0 && next) { ui_ctx->algo_white = lire_algo(next); i++; }
+        else if (strcmp(argv[i], "--black") == 0 && next) { ui_ctx->algo_black = lire_algo(next); i++; }
+        else if (strcmp(argv[i], "--quit-after") == 0 && next) { options->quit_after = atoi(next); i++; }
+        else printf("Unknown option: %s\n", argv[i]);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -350,8 +478,7 @@ int main(int argc, char *argv[]) {
     int game_over = 0;
     int winner = 0;
 
-    (void)argc;
-    (void)argv;
+    OptionsLancement options;
     
     if (!interface_initialiser(&ui_ctx)) {
         printf("Failed to initialize UI\n");
@@ -373,6 +500,7 @@ int main(int argc, char *argv[]) {
     fprintf(f, "--- Chess Game - SDL2 UI ---\n");
 
     interface_charger_pieces(&ui_ctx);
+    lire_options(argc, argv, &ui_ctx, &options);
 
     SDL_Event e;
     int running = 1;
@@ -380,6 +508,8 @@ int main(int argc, char *argv[]) {
     int valid_moves[8][8] = {0};
     int n = 0;
     int pc_move_timer = 0;
+    RecherchePC recherche;
+    memset(&recherche, 0, sizeof(recherche));
     int promotion_move_indices[8] = {0};
     int promotion_move_count = 0;
     int promotion_src_x = -1, promotion_src_y = -1;
@@ -387,60 +517,43 @@ int main(int argc, char *argv[]) {
     
     printf("Game initialized. Board has %d pieces.\n", nombre_pieces(&conf));
     
+    if (options.autostart) {
+        ui_ctx.selected_option = MENU_PVPC;
+        demarrer_partie_sdl(&ui_ctx, &conf, &num_coup, &nb_coups, &player, &game_over, &winner,
+                       &selected_x, &selected_y, valid_moves);
+    }
+
     while (running) {
+        if (options.autostart && (game_over || (options.quit_after > 0 && num_coup >= options.quit_after))) {
+            running = 0;
+        }
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) {
                 running = 0;
             }
             
             if (ui_ctx.state == STATE_MENU) {
-                if (e.type == SDL_KEYDOWN) {
-                    if (e.key.keysym.sym == SDLK_UP) {
-                        ui_ctx.selected_option = (ui_ctx.selected_option + 3) % 4;
-                    } else if (e.key.keysym.sym == SDLK_DOWN) {
-                        ui_ctx.selected_option = (ui_ctx.selected_option + 1) % 4;
-                    } else if (e.key.keysym.sym == SDLK_LEFT) {
-                        if (ui_ctx.depth > 1) ui_ctx.depth--;
-                    } else if (e.key.keysym.sym == SDLK_RIGHT) {
-                        if (ui_ctx.depth < 8) ui_ctx.depth++;
-                    } else if (e.key.keysym.sym == SDLK_q) {
-                        if (ui_ctx.est_white > 0) ui_ctx.est_white--;
-                    } else if (e.key.keysym.sym == SDLK_a) {
-                        if (ui_ctx.est_white < nbEst - 1) ui_ctx.est_white++;
-                    } else if (e.key.keysym.sym == SDLK_w) {
-                        if (ui_ctx.est_black > 0) ui_ctx.est_black--;
-                    } else if (e.key.keysym.sym == SDLK_s) {
-                        if (ui_ctx.est_black < nbEst - 1) ui_ctx.est_black++;
-                    } else if (e.key.keysym.sym == SDLK_e) {
-                        if (ui_ctx.width == 0) ui_ctx.width = 4;
-                        else if (ui_ctx.width > 1) ui_ctx.width--;
-                    } else if (e.key.keysym.sym == SDLK_d) {
-                        if (ui_ctx.width == 0) ui_ctx.width = 4;
-                        else if (ui_ctx.width < 20) ui_ctx.width++;
-                    } else if (e.key.keysym.sym == SDLK_r) {
-                        ui_ctx.width = 0;
-                    } else if (e.key.keysym.sym == SDLK_RETURN) {
-                        if (ui_ctx.selected_option == 3) {
-                            running = 0;
-                        } else {
-                            demarrer_partie_sdl(&ui_ctx, &conf, &num_coup, &nb_coups, &player,
-                                           &game_over, &winner, &selected_x, &selected_y,
-                                           valid_moves);
-                        }
-                    }
-                } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                    int mx = e.button.x;
-                    int my = e.button.y;
-                    int option_x = 112;
-                    int option_w = 422;
-                    int option_h = 66;
+                int row = -1;
+                int control = MENU_CTRL_DECREMENT;
 
-                    for (int i = 0; i < 4; i++) {
-                        int option_y = 298 + i * 82;
-                        if (mx >= option_x && mx < option_x + option_w &&
-                            my >= option_y && my < option_y + option_h) {
-                            ui_ctx.selected_option = (MenuOption)i;
-                            if (i == MENU_QUIT) {
+                if (e.type == SDL_KEYDOWN) {
+                    switch (e.key.keysym.sym) {
+                        case SDLK_UP: ui_ctx.selected_option = (ui_ctx.selected_option + 3) % 4; break;
+                        case SDLK_DOWN: ui_ctx.selected_option = (ui_ctx.selected_option + 1) % 4; break;
+                        case SDLK_LEFT: row = MENU_ROW_DEPTH; control = MENU_CTRL_DECREMENT; break;
+                        case SDLK_RIGHT: row = MENU_ROW_DEPTH; control = MENU_CTRL_INCREMENT; break;
+                        case SDLK_q: row = MENU_ROW_WHITE_EVAL; control = MENU_CTRL_DECREMENT; break;
+                        case SDLK_a: row = MENU_ROW_WHITE_EVAL; control = MENU_CTRL_INCREMENT; break;
+                        case SDLK_w: row = MENU_ROW_BLACK_EVAL; control = MENU_CTRL_DECREMENT; break;
+                        case SDLK_s: row = MENU_ROW_BLACK_EVAL; control = MENU_CTRL_INCREMENT; break;
+                        case SDLK_e: row = MENU_ROW_WIDTH; control = MENU_CTRL_DECREMENT; break;
+                        case SDLK_d: row = MENU_ROW_WIDTH; control = MENU_CTRL_INCREMENT; break;
+                        case SDLK_r: row = MENU_ROW_WIDTH; control = MENU_CTRL_ALL; break;
+                        case SDLK_z: row = MENU_ROW_WHITE_SEARCH; control = MENU_CTRL_INCREMENT; break;
+                        case SDLK_x: row = MENU_ROW_BLACK_SEARCH; control = MENU_CTRL_INCREMENT; break;
+                        case SDLK_b: row = MENU_ROW_BENCHMARK; control = basculer(ui_ctx.benchmark); break;
+                        case SDLK_RETURN:
+                            if (ui_ctx.selected_option == MENU_QUIT) {
                                 running = 0;
                             } else {
                                 demarrer_partie_sdl(&ui_ctx, &conf, &num_coup, &nb_coups, &player,
@@ -448,31 +561,25 @@ int main(int argc, char *argv[]) {
                                                valid_moves);
                             }
                             break;
-                        }
                     }
+                } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                    int card = interface_menu_carte(e.button.x, e.button.y);
 
-                    if (ui_ctx.state == STATE_MENU) {
-                        if (mx >= 930 && mx < 962) {
-                            if (my >= 314 && my < 346 && ui_ctx.est_white > 0) ui_ctx.est_white--;
-                            else if (my >= 396 && my < 428 && ui_ctx.est_black > 0) ui_ctx.est_black--;
-                            else if (my >= 478 && my < 510 && ui_ctx.depth > 1) ui_ctx.depth--;
-                            else if (my >= 560 && my < 592) {
-                                if (ui_ctx.width == 0) ui_ctx.width = 4;
-                                else if (ui_ctx.width > 1) ui_ctx.width--;
-                            }
-                        } else if (mx >= 968 && mx < 1000) {
-                            if (my >= 314 && my < 346 && ui_ctx.est_white < nbEst - 1) ui_ctx.est_white++;
-                            else if (my >= 396 && my < 428 && ui_ctx.est_black < nbEst - 1) ui_ctx.est_black++;
-                            else if (my >= 478 && my < 510 && ui_ctx.depth < 8) ui_ctx.depth++;
-                            else if (my >= 560 && my < 592) {
-                                if (ui_ctx.width == 0) ui_ctx.width = 4;
-                                else if (ui_ctx.width < 20) ui_ctx.width++;
-                            }
-                        } else if (mx >= 894 && mx < 990 && my >= 560 && my < 592) {
-                            ui_ctx.width = 0;
+                    if (card >= 0) {
+                        ui_ctx.selected_option = (MenuOption)card;
+                        if (card == MENU_QUIT) {
+                            running = 0;
+                        } else {
+                            demarrer_partie_sdl(&ui_ctx, &conf, &num_coup, &nb_coups, &player,
+                                           &game_over, &winner, &selected_x, &selected_y,
+                                           valid_moves);
                         }
+                    } else {
+                        interface_menu_controle(e.button.x, e.button.y, &row, &control);
                     }
                 }
+
+                if (row >= 0) appliquer_reglage_menu(&ui_ctx, row, control);
             }
             else if (ui_ctx.state == STATE_PROMOTION) {
                 char choice = 0;
@@ -500,20 +607,10 @@ int main(int argc, char *argv[]) {
                             break;
                     }
                 } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                    int box_w = 320, box_h = 100;
-                    int box_x = SCREEN_WIDTH / 2 - box_w / 2;
-                    int box_y = SCREEN_HEIGHT / 2 - box_h / 2;
                     int option_values[] = {'n', 't', 'f', 'c'};
+                    int option = interface_option_promotion(e.button.x, e.button.y);
 
-                    for (int i = 0; i < 4; i++) {
-                        int opt_x = box_x + 16 + i * 72;
-                        int opt_y = box_y + 46;
-                        if (e.button.x >= opt_x && e.button.x < opt_x + 64 &&
-                            e.button.y >= opt_y && e.button.y < opt_y + 40) {
-                            choice = (char)option_values[i];
-                            break;
-                        }
-                    }
+                    if (option >= 0) choice = (char)option_values[option];
                 }
 
                 if (choice != 0) {
@@ -548,7 +645,6 @@ int main(int argc, char *argv[]) {
                         int gx = (mx - BOARD_OFFSET_X) / TILE_SIZE;
                         int gy = (my - BOARD_OFFSET_Y) / TILE_SIZE;
                         
-                        // we index gx/gy 0-7 (file a-h, rank 1-8), matching mat[row][col] where row 0 is rank 1
                         if (e.button.button == SDL_BUTTON_RIGHT) {
                             selected_x = -1;
                             selected_y = -1;
@@ -622,6 +718,7 @@ int main(int argc, char *argv[]) {
                 
                 if (e.type == SDL_KEYDOWN) {
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        abandonner_recherche(&recherche);
                         ui_ctx.state = STATE_MENU;
                     }
                 }
@@ -639,50 +736,52 @@ int main(int argc, char *argv[]) {
                         (ui_ctx.game_mode == 2 && is_white) ||
                         (ui_ctx.game_mode == 3 && !is_white);
             
-            if (pc_turn) {
+            if (pc_turn && !recherche.thread) {
                 pc_move_timer++;
                 if (pc_move_timer > 15) {
-                    int est_func = is_white ? ui_ctx.est_white : ui_ctx.est_black;
-                    generer_successeurs(&conf, player, T, &n);
-                    
-                    if (n == 0) {
-                        if (resoudre_etat_partie(&conf, player, &winner)) {
-                            game_over = 1;
-                            ui_ctx.state = STATE_GAME_OVER;
-                            annoncer_resultat(winner);
-                        }
-                    } else {
+                    lancer_recherche(&recherche, &ui_ctx, &conf, player);
+                    pc_move_timer = 0;
+                }
+            } else if (pc_turn && SDL_AtomicGet(&recherche.done)) {
+                SDL_WaitThread(recherche.thread, NULL);
+                recherche.thread = NULL;
+
+                if (!recherche.success) {
+                    if (resoudre_etat_partie(&conf, player, &winner)) {
+                        game_over = 1;
+                        ui_ctx.state = STATE_GAME_OVER;
+                        annoncer_resultat(winner);
+                    }
+                } else {
                     struct config before_move;
                     copier(&conf, &before_move);
 
-                    int success = gerer_tour_pc(&conf, T, coup, player,
-                                                    ui_ctx.depth, ui_ctx.width, est_func);
-                        
-                        if (!success) {
-                            if (resoudre_etat_partie(&conf, player, &winner)) {
-                                game_over = 1;
-                                ui_ctx.state = STATE_GAME_OVER;
-                                annoncer_resultat(winner);
-                            }
-                        } else {
-                            ajouter_historique_coup(historique, &nb_coups, coup);
-                            num_coup++;
+                    comptabiliser_recherche(&ui_ctx, &recherche);
+                    formuler_coup(&conf, &recherche.chosen, coup);
+                    copier(&recherche.chosen, &conf);
+                    conf.val = recherche.res.score;
 
-                            detecter_delta_coup(&before_move, &conf,
-                                &ui_ctx.last_move_sx, &ui_ctx.last_move_sy,
-                                &ui_ctx.last_move_dx, &ui_ctx.last_move_dy);
-                            
-                            printf("PC Move %d: %s (player=%c)\n", num_coup, coup, player == MAX ? 'B' : 'N');
-                            terminer_tour(&conf, &player, &game_over, &winner, &ui_ctx);
-                        }
-                    }
-                    pc_move_timer = 0;
+                    ajouter_historique_coup(historique, &nb_coups, coup);
+                    num_coup++;
+
+                    detecter_delta_coup(&before_move, &conf,
+                        &ui_ctx.last_move_sx, &ui_ctx.last_move_sy,
+                        &ui_ctx.last_move_dx, &ui_ctx.last_move_dy);
+
+                    printf("PC Move %d: %s (player=%c)\n", num_coup, coup, player == MAX ? 'B' : 'N');
+                    terminer_tour(&conf, &player, &game_over, &winner, &ui_ctx);
                 }
             }
         }
-        
-        SDL_SetRenderDrawColor(ui_ctx.renderer, 20, 20, 30, 255);
-        SDL_RenderClear(ui_ctx.renderer);
+
+        if (recherche.thread && ui_ctx.state != STATE_PLAYING) abandonner_recherche(&recherche);
+
+        ui_ctx.thinking = !game_over && ui_ctx.state == STATE_PLAYING &&
+            ((ui_ctx.game_mode == 1) || (ui_ctx.game_mode == 2 && player == MAX) ||
+             (ui_ctx.game_mode == 3 && player == MIN));
+        ui_ctx.thinking_seconds = recherche.thread ? (SDL_GetTicks() - recherche.started) / 1000.0 : 0.0;
+
+        interface_effacer_ecran(&ui_ctx);
         
         if (ui_ctx.state == STATE_MENU) {
             interface_dessiner_menu(&ui_ctx);
@@ -707,6 +806,7 @@ int main(int argc, char *argv[]) {
         SDL_Delay(16);
     }
     
+    abandonner_recherche(&recherche);
     fprintf(f, "Game ended. Total moves: %d\n", num_coup);
     fclose(f);
     interface_nettoyer(&ui_ctx);
